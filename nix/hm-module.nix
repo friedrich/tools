@@ -12,27 +12,12 @@ in
   options.tools = {
     enable = lib.mkEnableOption "the CLI tools (gh-logs, gh-api-ro, bisect-log, wt, claude-*)";
 
-    # The hook scripts need jq on PATH, and the hooks section of
-    # ~/.claude/settings.json must reference them (see README).
-    claudeHooks.enable = lib.mkEnableOption "the Claude Code sandbox hooks in ~/.claude/hooks";
-
     claudeZshFunctions.enable = lib.mkEnableOption "the claude()/claude-mitm() zsh functions";
   };
 
   config = lib.mkMerge [
     (lib.mkIf cfg.enable {
       home.packages = builtins.attrValues toolPackages;
-    })
-
-    (lib.mkIf cfg.claudeHooks.enable {
-      home.file.".claude/hooks/sandbox-autoallow.sh" = {
-        source = ../claude/hooks/sandbox-autoallow.sh;
-        executable = true;
-      };
-      home.file.".claude/hooks/sandbox-allow-cwd-read.sh" = {
-        source = ../claude/hooks/sandbox-allow-cwd-read.sh;
-        executable = true;
-      };
     })
 
     (lib.mkIf cfg.claudeZshFunctions.enable {

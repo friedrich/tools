@@ -51,41 +51,6 @@ or use the Home Manager module, which also covers the Claude Code environment:
   imports = [ inputs.tools.homeManagerModules.default ];
 
   tools.enable = true;                   # all CLI tools on PATH
-  tools.claudeHooks.enable = true;       # sandbox hooks in ~/.claude/hooks
   tools.claudeZshFunctions.enable = true; # claude() walk-up wrapper, claude-mitm()
 }
 ```
-
-## Claude Code hooks
-
-`claudeHooks.enable` installs two scripts into `~/.claude/hooks/`:
-
-- **`sandbox-autoallow.sh`** — PreToolUse hook that auto-allows every *sandboxed* Bash command, bypassing the static command parser. Commands that opt out of the sandbox (`dangerouslyDisableSandbox: true`) still go through the normal permission flow.
-- **`sandbox-allow-cwd-read.sh`** — SessionStart/ConfigChange hook that makes the project directory readable inside the sandbox by adding `"."` to `.sandbox.filesystem.allowRead` in the project's `settings.local.json`.
-
-The scripts require `jq` on PATH. Installing the files is not enough — wire them up in the `hooks` section of `~/.claude/settings.json`:
-
-```json
-{
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [{ "type": "command", "command": "~/.claude/hooks/sandbox-autoallow.sh" }]
-      }
-    ],
-    "SessionStart": [
-      {
-        "hooks": [{ "type": "command", "command": "~/.claude/hooks/sandbox-allow-cwd-read.sh", "timeout": 5 }]
-      }
-    ],
-    "ConfigChange": [
-      {
-        "hooks": [{ "type": "command", "command": "~/.claude/hooks/sandbox-allow-cwd-read.sh", "timeout": 5 }]
-      }
-    ]
-  }
-}
-```
-
-**Warning:** a PreToolUse `allow` decision bypasses the entire permission system for that call, including `permissions.deny` rules. With `sandbox-autoallow.sh` active, enforce hard limits at the sandbox layer (filesystem `denyWrite`/`denyRead`, network allowlist) — those still apply.
