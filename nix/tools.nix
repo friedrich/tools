@@ -49,4 +49,10 @@
     name = "claude-unend";
     text = ''exec ${pkgs.python3}/bin/python3 ${../scripts/claude-unend.py} "$@"'';
   };
+
+  # Undo the last compaction of a Claude Code session, as a new session.
+  claude-uncompact = pkgs.writeShellApplication {
+    name = "claude-uncompact";
+    text = ''exec ${pkgs.python3}/bin/python3 ${../scripts/claude-uncompact.py} "$@"'';
+  };
 }

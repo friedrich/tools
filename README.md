@@ -14,6 +14,7 @@ Personal CLI tools and Claude Code environment, packaged as a Nix flake.
 - **`claude-grep`** — search Claude Code conversations recorded for the current directory.
 - **`claude-clone`** — copy a Claude Code conversation to another folder, locally or on a remote host (scp-style destination).
 - **`claude-unend`** — revive a Claude Code session ended by the model so it can be resumed.
+- **`claude-uncompact`** — undo the last compaction of a Claude Code conversation by copying it, truncated at the compaction point, into a new session.
 
 ## Usage
 
