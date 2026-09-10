@@ -115,6 +115,10 @@ def cleanup(git, repo_root, wt, branch):
         print("  to discard:")
         print(f"    {c(f'git worktree remove --force {rel} && git branch -D {branch}', 'dim')}")
     git("worktree", "prune")
+    try:
+        wt.parent.rmdir()
+    except OSError:
+        pass
 
 
 if __name__ == "__main__":
