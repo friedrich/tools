@@ -55,4 +55,11 @@
     name = "claude-uncompact";
     text = ''exec ${pkgs.python3}/bin/python3 ${../scripts/claude-uncompact.py} "$@"'';
   };
+
+  # Edit Claude Code permission and sandbox settings.
+  cperm = pkgs.writeShellApplication {
+    name = "cperm";
+    runtimeInputs = [ pkgs.lsof ];
+    text = ''exec ${pkgs.python3}/bin/python3 ${../scripts/cperm.py} "$@"'';
+  };
 }
