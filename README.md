@@ -15,7 +15,7 @@ Personal CLI tools and Claude Code environment, packaged as a Nix flake.
 - **`claude-clone`** — copy a Claude Code conversation to another folder, locally or on a remote host (scp-style destination).
 - **`claude-unend`** — revive a Claude Code session ended by the model so it can be resumed.
 - **`claude-uncompact`** — undo the last compaction of a Claude Code conversation by copying it, truncated at the compaction point, into a new session.
-- **`cperm`** — add or remove Claude Code sandbox paths, hosts, sockets and permission rules (`cperm sandbox rw PATH`, `cperm allow RULE`, …), printing a diff of the settings file it changes. Inside the Claude Code sandbox, where the settings files are off limits, it hands edits to `cperm serve`, a broker outside the sandbox that applies each one only after it is allowed in a dialog (macOS; `tools.cpermBroker.enable` runs it as a launchd agent, and `/private/tmp/cperm-UID` must be in `sandbox.network.allowUnixSockets`).
+- **`cperm`** — add or remove Claude Code sandbox paths, hosts, sockets and permission rules (`cperm sandbox rw PATH`, `cperm allow RULE`, `cperm basic` for project editing and web search, …), printing a diff of the settings file it changes. Inside the Claude Code sandbox, where the settings files are off limits, it hands edits to `cperm serve`, a broker outside the sandbox that applies each one only after it is allowed in a dialog (macOS; `tools.cpermBroker.enable` runs it as a launchd agent, and `/private/tmp/cperm-UID` must be in `sandbox.network.allowUnixSockets`).
 
 ## Usage
 

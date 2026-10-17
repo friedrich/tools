@@ -8,6 +8,8 @@
     cperm sandbox mach NAME...    sandbox.network.allowMachLookup
     cperm sandbox local-binding   sandbox.network.allowLocalBinding
     cperm allow RULE...           permissions.allow, e.g. 'Bash(nix:*)'
+    cperm basic                   Edit(/**) and WebSearch in permissions.allow,
+                                  . in sandbox.filesystem.allowRead
     cperm rm COMMAND...           removes what COMMAND would add
     cperm show                    lists the entries of every scope
     cperm serve                   runs the broker (see below)
@@ -70,6 +72,12 @@ UNIX_SOCKETS = ("sandbox", "network", "allowUnixSockets")
 MACH_LOOKUP = ("sandbox", "network", "allowMachLookup")
 LOCAL_BINDING = ("sandbox", "network", "allowLocalBinding")
 PERMISSIONS_ALLOW = ("permissions", "allow")
+
+BASIC = [
+    (PERMISSIONS_ALLOW, "Edit(/**)"),
+    (PERMISSIONS_ALLOW, "WebSearch"),
+    (ALLOW_READ, "."),
+]
 
 SHOWN = [
     ("permissions", "allow"),
@@ -305,6 +313,10 @@ def apply(edit: Edit, args) -> None:
     if args.cmd == "allow":
         for rule in args.values:
             edit.entry(PERMISSIONS_ALLOW, rule)
+        return
+    if args.cmd == "basic":
+        for path, entry in BASIC:
+            edit.entry(path, entry)
         return
     what = args.what
     if what == "local-binding":
@@ -651,6 +663,9 @@ def add_edit_commands(sub, leaf: argparse.ArgumentParser) -> None:
 
     allow = sub.add_parser("allow", parents=[leaf], help="permission rules (permissions.allow)")
     allow.add_argument("values", nargs="+", metavar="RULE")
+
+    sub.add_parser("basic", parents=[leaf],
+                   help="project editing and web search (Edit(/**), WebSearch, allowRead .)")
 
 
 def parser() -> argparse.ArgumentParser:
