@@ -10,6 +10,7 @@
     cperm allow RULE...           permissions.allow, e.g. 'Bash(nix:*)'
     cperm rm COMMAND...           removes what COMMAND would add
     cperm show                    lists the entries of every scope
+    cperm serve                   runs the broker (see below)
 
 PATH uses sandbox path syntax:
   /               absolute path from filesystem root
@@ -25,21 +26,35 @@ Paths in Read(...) and Edit(...) rules use a different syntax:
   path or ./path  path relative to current directory, e.g. Read(*.env)
 
 Each edit prints a diff of the file it changed.
+
+The Claude Code sandbox keeps commands from reading or writing the settings
+files. An edit that fails there goes to the broker, a `cperm serve` process
+outside the sandbox listening on /private/tmp/cperm-UID/broker.sock; add that
+directory to sandbox.network.allowUnixSockets. The broker repeats the edit
+itself and applies it only once it is allowed in a dialog. macOS only.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import difflib
 import functools
+import io
 import json
 import json.scanner
 import os
 import re
 import shutil
+import socket
+import stat
+import struct
 import subprocess
 import sys
 import tempfile
+import unicodedata
+from collections.abc import Callable
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 SCOPES = ("user", "project", "local")
@@ -67,8 +82,18 @@ SHOWN = [
 ]
 
 
+SOCKET_DIR = Path(f"/private/tmp/cperm-{os.getuid()}")
+SOCKET = SOCKET_DIR / "broker.sock"
+DIALOG_TIMEOUT = 120
+SOL_LOCAL, LOCAL_PEERPID = 0, 2  # <sys/un.h>
+
+
 class UsageError(Exception):
     pass
+
+
+class Denied(UsageError):
+    """Raised when a settings file cannot be read or written for lack of permission."""
 
 
 def dotted(path: tuple[str, ...]) -> str:
@@ -91,30 +116,32 @@ def project_root() -> Path:
     its Bash tool changes directory.
     """
     pid = os.environ.get("CLAUDE_PID")
-    if not pid:
-        return Path.cwd()
+    return process_cwd(pid) if pid else Path.cwd()
+
+
+def process_cwd(pid: str | int) -> Path:
     try:
         return Path(os.readlink(f"/proc/{pid}/cwd"))
     except OSError:
         pass
     try:
         out = subprocess.run(
-            ["lsof", "-a", "-p", pid, "-d", "cwd", "-Fn"],
+            ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"],
             capture_output=True, text=True, check=True,
         ).stdout
     except (OSError, subprocess.CalledProcessError) as e:
-        raise UsageError(f"cannot find the project directory of Claude Code (pid {pid}): {e}")
+        raise UsageError(f"cannot find the working directory of pid {pid}: {e}")
     for line in out.splitlines():
         if line.startswith("n"):
             return Path(line[1:])
-    raise UsageError(f"cannot find the project directory of Claude Code (pid {pid})")
+    raise UsageError(f"cannot find the working directory of pid {pid}")
 
 
-def settings_file(scope: str) -> Path:
+def settings_file(scope: str, root: Callable[[], Path] = project_root) -> Path:
     if scope == "user":
         return config_dir() / "settings.json"
     name = "settings.json" if scope == "project" else "settings.local.json"
-    return project_root() / ".claude" / name
+    return root() / ".claude" / name
 
 
 # --- settings document -------------------------------------------------------
@@ -259,6 +286,9 @@ class Edit:
 
 
 def validate(args) -> None:
+    for v in getattr(args, "values", []):
+        if any(unprintable(c) for c in v):
+            raise UsageError(f"{v!r} contains control or format characters")
     if args.cmd == "sandbox" and args.what == "host":
         for v in args.values:
             if "://" in v or "/" in v:
@@ -312,7 +342,10 @@ def write(target: Path, text: str) -> None:
         raise
 
 
-SANDBOX_HINT = "Settings files are protected inside the Claude Code sandbox; run cperm outside it."
+SANDBOX_HINT = (
+    "Settings files are protected inside the Claude Code sandbox; "
+    "run cperm outside it, or run the broker (cperm serve) to have edits approved in a dialog."
+)
 
 
 def read(path: Path) -> str | None:
@@ -321,13 +354,54 @@ def read(path: Path) -> str | None:
         return path.read_text(encoding="utf-8")
     except FileNotFoundError:
         return None
+    except PermissionError as e:
+        raise Denied(f"cannot read {path}: {e.strerror}. {SANDBOX_HINT}")
     except OSError as e:
-        raise UsageError(f"cannot read {path}: {e.strerror}. {SANDBOX_HINT}")
+        raise UsageError(f"cannot read {path}: {e.strerror}")
 
 
-def run_edit(args) -> int:
+@dataclasses.dataclass
+class Change:
+    scope: str
+    path: Path
+    target: Path
+    old: str
+    new: str
+    notes: list[str]
+
+    @property
+    def shown(self) -> str:
+        return str(self.path) if self.path == self.target else f"{self.path} -> {self.target}"
+
+    def diff(self) -> str:
+        return "".join(difflib.unified_diff(
+            self.old.splitlines(keepends=True), self.new.splitlines(keepends=True),
+            fromfile=str(self.path), tofile=str(self.path), n=1,
+        ))
+
+    def report(self, dry_run: bool) -> str:
+        lines = [f"{note}\n" for note in self.notes]
+        if self.new == self.old:
+            lines.append(f"no change: {self.shown}\n")
+        else:
+            lines.append(f"{'would edit' if dry_run else 'edited'} ({self.scope}): {self.shown}\n")
+            lines.append(self.diff())
+        return "".join(lines)
+
+    def commit(self) -> None:
+        if self.new == self.old:
+            return
+        try:
+            write(self.target, self.new)
+        except PermissionError as e:
+            raise Denied(f"cannot write {self.target}: {e.strerror}. {SANDBOX_HINT}")
+        except OSError as e:
+            raise UsageError(f"cannot write {self.target}: {e.strerror}")
+
+
+def plan(args, root: Callable[[], Path] = project_root) -> Change:
     validate(args)
-    path = settings_file(args.scope)
+    path = settings_file(args.scope, root)
     try:
         target = path.resolve()  # the user settings file is often a symlink
     except OSError:
@@ -340,29 +414,181 @@ def run_edit(args) -> int:
 
     edit = Edit(settings, args.remove)
     apply(edit, args)
-    for note in edit.notes:
-        print(note)
-
     new = settings.dumps()
     if not old.strip() and settings.data == {}:
         new = old
-    shown = str(path) if path == target else f"{path} -> {target}"
-    if new == old:
-        print(f"no change: {shown}")
-        return 0
-    print(f"{'would edit' if args.dry_run else 'edited'} ({args.scope}): {shown}")
-    sys.stdout.writelines(difflib.unified_diff(
-        old.splitlines(keepends=True), new.splitlines(keepends=True),
-        fromfile=str(path), tofile=str(path), n=1,
-    ))
-    if args.dry_run:
-        return 0
+    return Change(args.scope, path, target, old, new, edit.notes)
+
+
+def run_edit(args) -> int:
     try:
-        write(target, new)
-    except OSError as e:
-        print(f"cperm: cannot write {target}: {e.strerror}. {SANDBOX_HINT}", file=sys.stderr)
-        return 1
+        change = plan(args)
+        if not args.dry_run:
+            change.commit()
+    except Denied:
+        if args.dry_run or not SOCKET.exists():
+            raise
+        return delegate()
+    print(change.report(args.dry_run), end="")
     return 0
+
+
+# --- broker ------------------------------------------------------------------
+
+
+def delegate() -> int:
+    """Hands this invocation to the broker and relays its output."""
+    request = {"argv": sys.argv[1:], "claude_pid": os.environ.get("CLAUDE_PID")}
+    print(f"cperm: sandboxed; waiting up to {DIALOG_TIMEOUT}s for approval in the broker's dialog",
+          file=sys.stderr)
+    try:
+        with socket.socket(socket.AF_UNIX) as s:
+            s.settimeout(DIALOG_TIMEOUT + 30)
+            s.connect(str(SOCKET))
+            s.sendall(json.dumps(request).encode() + b"\n")
+            s.shutdown(socket.SHUT_WR)
+            with s.makefile("rb") as f:
+                reply = json.loads(f.read())
+    except (OSError, ValueError) as e:
+        raise UsageError(
+            f"cannot reach the broker at {SOCKET}: {e}. "
+            f"Is {SOCKET_DIR} in sandbox.network.allowUnixSockets?"
+        )
+    sys.stdout.write(reply["stdout"])
+    sys.stderr.write(reply["stderr"])
+    return reply["code"]
+
+
+def serve(args) -> int:
+    if sys.platform != "darwin":
+        raise UsageError("the broker needs macOS")
+    try:
+        SOCKET_DIR.mkdir(mode=0o700)
+    except FileExistsError:
+        pass
+    st = SOCKET_DIR.lstat()
+    if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid():
+        raise UsageError(f"{SOCKET_DIR} is not a directory owned by you")
+    SOCKET_DIR.chmod(0o700)
+    SOCKET.unlink(missing_ok=True)
+
+    with socket.socket(socket.AF_UNIX) as server:
+        server.bind(str(SOCKET))
+        server.listen()
+        inode = SOCKET.stat().st_ino
+        server.settimeout(3600)
+        log(f"listening on {SOCKET}")
+        while True:
+            try:
+                conn, _ = server.accept()
+            except TimeoutError:
+                # Lets launchd restart a broker whose socket was cleaned out of /tmp.
+                try:
+                    if SOCKET.stat().st_ino == inode:
+                        continue
+                except FileNotFoundError:
+                    pass
+                log(f"{SOCKET} is gone; exiting")
+                return 1
+            with conn:
+                conn.settimeout(10)
+                try:
+                    code, out, err = handle(conn)
+                except Exception as e:  # keeps one bad request from stopping the broker
+                    code, out, err = 2, "", f"cperm broker: {type(e).__name__}: {e}\n"
+                log(f"exit {code}: {(out + err).strip()}")
+                try:
+                    conn.sendall(json.dumps({"code": code, "stdout": out, "stderr": err}).encode())
+                except OSError as e:
+                    log(f"cannot reply: {e}")
+
+
+def handle(conn: socket.socket) -> tuple[int, str, str]:
+    """Runs one delegated edit and returns its exit code, stdout and stderr."""
+    peer = struct.unpack("i", conn.getsockopt(SOL_LOCAL, LOCAL_PEERPID, 4))[0]
+    with conn.makefile("rb") as f:
+        request = json.loads(f.readline(1 << 16))
+    argv = request.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
+        return 2, "", "cperm broker: malformed request\n"
+    log(f"pid {peer}: cperm {' '.join(argv)}")
+
+    err = io.StringIO()
+    try:
+        with redirect_stdout(io.StringIO()), redirect_stderr(err):
+            args = parser().parse_args(argv)
+    except SystemExit:
+        return 2, "", err.getvalue()
+    if args.cmd in ("show", "serve") or args.dry_run:
+        return 2, "", "cperm broker: only edits can be delegated\n"
+    args.scope = args.scope or "local"
+
+    try:
+        root = requester_root(request.get("claude_pid"), peer)
+        change = plan(args, lambda: root)
+        if change.new != change.old:
+            if not approve(dialog_text(change, root)):
+                return 1, "", "cperm: not allowed in the broker's dialog\n"
+            change.commit()
+    except UsageError as e:
+        return 2, "", f"cperm: {e}\n"
+    return 0, change.report(dry_run=False), ""
+
+
+def requester_root(claude_pid, peer: int) -> Path:
+    """Returns the project root of the requester, determined from its process tree.
+
+    The claimed Claude Code pid counts only if it is an ancestor of the
+    connecting process; otherwise the connecting process's own directory is
+    used.
+    """
+    out = subprocess.run(
+        ["/bin/ps", "-axo", "pid=,ppid="], capture_output=True, text=True, check=True,
+    ).stdout
+    parent = dict(tuple(map(int, line.split())) for line in out.splitlines())
+    lineage, pid = set(), peer
+    while pid > 1 and pid not in lineage:
+        lineage.add(pid)
+        pid = parent.get(pid, 0)
+    if isinstance(claude_pid, str) and claude_pid.isdigit() and int(claude_pid) in lineage:
+        return process_cwd(int(claude_pid))
+    return process_cwd(peer)
+
+
+def unprintable(c: str) -> bool:
+    return unicodedata.category(c)[0] == "C" or unicodedata.category(c) in ("Zl", "Zp")
+
+
+def dialog_text(change: Change, root: Path) -> str:
+    hunks = [line for line in change.diff().splitlines() if not line.startswith(("---", "+++"))]
+    text = "\n".join([
+        f"A sandboxed command wants to edit the {change.scope} settings.",
+        "",
+        f"Requested from: {root}",
+        f"File: {change.shown}",
+        "",
+        *hunks,
+    ])
+    return "".join(c if c == "\n" or not unprintable(c) else f"\\x{{{ord(c):x}}}" for c in text)
+
+
+DIALOG = """on run argv
+  activate
+  set answer to display dialog (item 1 of argv) with title "cperm" buttons {"Deny", "Allow"} default button "Deny" with icon caution giving up after (item 2 of argv as integer)
+  return button returned of answer
+end run"""
+
+
+def approve(text: str) -> bool:
+    result = subprocess.run(
+        ["/usr/bin/osascript", "-e", DIALOG, text, str(DIALOG_TIMEOUT)],
+        capture_output=True, text=True,
+    )
+    return result.returncode == 0 and result.stdout.strip() == "Allow"
+
+
+def log(message: str) -> None:
+    print(message, file=sys.stderr, flush=True)
 
 
 def show(args) -> int:
@@ -445,6 +671,7 @@ def parser() -> argparse.ArgumentParser:
     rm.set_defaults(remove=True)
     add_edit_commands(rm.add_subparsers(dest="cmd", required=True, metavar="COMMAND"), leaf)
     sub.add_parser("show", parents=[leaf], help="list the entries of every scope")
+    sub.add_parser("serve", help="run the broker that applies edits from sandboxed commands")
     return p
 
 
@@ -453,6 +680,8 @@ def main() -> int:
     try:
         if args.cmd == "show":
             return show(args)
+        if args.cmd == "serve":
+            return serve(args)
         args.scope = args.scope or "local"
         return run_edit(args)
     except UsageError as e:

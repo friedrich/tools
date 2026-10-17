@@ -13,6 +13,10 @@ in
     enable = lib.mkEnableOption "the CLI tools (gh-logs, gh-api-ro, bisect-log, wt, claude-*)";
 
     claudeZshFunctions.enable = lib.mkEnableOption "the claude()/claude-mitm() zsh functions";
+
+    cpermBroker.enable = lib.mkEnableOption ''
+      the cperm broker, a launchd agent that applies cperm edits from sandboxed
+      Claude Code commands once they are allowed in a dialog (macOS)'';
   };
 
   config = lib.mkMerge [
@@ -41,6 +45,22 @@ in
           HTTPS_PROXY=http://127.0.0.1:8080 HTTP_PROXY=http://127.0.0.1:8080 claude "$@"
         }
       '';
+    })
+
+    (lib.mkIf cfg.cpermBroker.enable {
+      launchd.agents.cperm-broker = {
+        enable = true;
+        config = {
+          ProgramArguments = [
+            (lib.getExe toolPackages.cperm)
+            "serve"
+          ];
+          RunAtLoad = true;
+          KeepAlive = true;
+          ProcessType = "Interactive";
+          StandardErrorPath = "${config.home.homeDirectory}/Library/Logs/cperm-broker.log";
+        };
+      };
     })
   ];
 }
