@@ -127,7 +127,8 @@ def uncompact(sid_prefix: str) -> int:
     print(f"truncated {old_sid} at line {cut + 1} "
           f"({len(lines) - cut} record(s) after the last compaction dropped)")
     print(f"new session: {out_jsonl}")
-    print(f"resume with: claude --resume {new_sid}")
+    print("resume with:")
+    print(f"claude --resume {new_sid}")
     return 0
 
 
